@@ -18,12 +18,12 @@ import os
 from typing import Annotated, Optional, TypedDict
 
 import requests
-from langchain_core.messages import AnyMessage, SystemMessage, trim_messages
+from langchain_core.messages import AnyMessage, RemoveMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.graph import START, StateGraph
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode
 
 try:
     from tavily import TavilyClient
@@ -52,21 +52,27 @@ class PlannerState(TypedDict):
     mood: str
     city: str
     recommendations: Annotated[dict, merge_recommendations]
+    summary: str
 
 
 # ---------------------------------------------------------------------------
 # 2. Tools — 4 real external calls, each with a docstring the model reads
 # ---------------------------------------------------------------------------
 _tavily_client = None
+_tavily_client_key = None
 
 
 def _get_tavily_client() -> "TavilyClient":
-    global _tavily_client
-    if _tavily_client is None:
-        api_key = os.environ.get("TAVILY_API_KEY")
-        if not api_key:
-            raise RuntimeError("TAVILY_API_KEY is not set in the environment")
+    global _tavily_client, _tavily_client_key
+    api_key = os.environ.get("TAVILY_API_KEY")
+    if not api_key:
+        raise RuntimeError("TAVILY_API_KEY is not set in the environment")
+    # Rebuild the client if it's the first call OR the key changed since
+    # the last time we built it (e.g. after a deliberate break-and-restore
+    # test) — otherwise a stale cached client silently keeps using the old key.
+    if _tavily_client is None or api_key != _tavily_client_key:
         _tavily_client = TavilyClient(api_key=api_key)
+        _tavily_client_key = api_key
     return _tavily_client
 
 
@@ -79,8 +85,8 @@ def search_local_spot(activity_type: str, city: str = "Dammam") -> dict:
         activity_type: what kind of place, e.g. 'quiet cafe', 'outdoor activity', 'family restaurant'.
         city: which Eastern Province city to search in. Defaults to Dammam.
     """
-    query = f"{activity_type} in {city}, Eastern Province Saudi Arabia"
-    result = _get_tavily_client().search(query=query, max_results=3)
+    query = f"{activity_type} في {city}، المنطقة الشرقية السعودية"
+    result = _get_tavily_client().search(query=query, max_results=3, timeout=15)
     return {"spot_suggestion": result.get("results", [])}
 
 
@@ -153,32 +159,51 @@ tools = [search_local_spot, search_movie_or_game, get_book_recommendation, get_w
 # ---------------------------------------------------------------------------
 # 3. Model + message trimming
 # ---------------------------------------------------------------------------
-llm = ChatGoogleGenerativeAI(model="gemini-flash-lite-latest", temperature=0.4)
+llm = ChatGoogleGenerativeAI(model="gemini-flash-latest", temperature=0.4)
 llm_with_tools = llm.bind_tools(tools)
 
 SYSTEM_PROMPT = (
-    "You are a Weekend Planner agent for people in Saudi Arabia's Eastern Province. "
-    "The user tells you their mood (e.g. 'طفشانة'). Use your tools to ground every "
-    "suggestion in a real search or API result — never invent a restaurant, movie, "
-    "game, book, or weather condition. Use the weather tool to decide indoor vs "
-    "outdoor. Reply with a short bilingual (Arabic + English) recommendation."
+    "أنت مساعد تخطيط عطلة نهاية الأسبوع لسكان المنطقة الشرقية بالسعودية. "
+    "يخبرك المستخدم بمزاجه (مثلاً 'طفشانة')، وعليك استخدام أدواتك لتأسيس كل "
+    "توصية على نتيجة بحث أو استدعاء API حقيقي — لا تخترع مطعماً أو فيلماً أو "
+    "لعبة أو حالة طقس أبداً. استخدم أداة الطقس لتقرر بين نشاط داخلي أو "
+    "خارجي. رد بتوصية مختصرة بالعربية والإنجليزية."
 )
 
 
 def assistant(state: PlannerState):
-    # Trimming (not summarization): cheap and predictable for a short
-    # mood -> recommendation conversation. Trade-off: older context is
-    # dropped rather than summarized if the thread runs long.
-    trimmed = trim_messages(
-        state["messages"],
-        max_tokens=12,
-        strategy="last",
-        token_counter=len,  # counts messages, not real tokens
-        include_system=False,
-        allow_partial=False,
-    )
-    response = llm_with_tools.invoke([SystemMessage(content=SYSTEM_PROMPT)] + trimmed)
+    summary = state.get("summary", "")
+    system_content = SYSTEM_PROMPT
+    if summary:
+        system_content += f"\n\nملخص المحادثة حتى الآن: {summary}"
+    response = llm_with_tools.invoke([SystemMessage(content=system_content)] + state["messages"])
     return {"messages": [response]}
+
+def summarize_conversation(state: PlannerState):
+    summary = state.get("summary", "")
+    if summary:
+        summary_prompt = (
+            f"هذا ملخص للمحادثة السابقة: {summary}\n\n"
+            "وسّعي الملخص أعلاه ليشمل الرسائل الجديدة أعلاه، بجملتين كحد أقصى:"
+        )
+    else:
+        summary_prompt = "لخصي المحادثة أعلاه بجملتين كحد أقصى:"
+
+    messages = state["messages"] + [SystemMessage(content=summary_prompt)]
+    response = llm.invoke(messages)  
+
+
+    delete_messages = [RemoveMessage(id=m.id) for m in state["messages"][:-2]]
+    return {"summary": response.content, "messages": delete_messages}
+
+
+def route_after_assistant(state: PlannerState):
+    last_message = state["messages"][-1]
+    if last_message.tool_calls:
+        return "tools"
+    if len(state["messages"]) > 6:
+        return "summarize_conversation"
+    return END
 
 
 # ---------------------------------------------------------------------------
@@ -190,9 +215,14 @@ def assistant(state: PlannerState):
 # ---------------------------------------------------------------------------
 builder = StateGraph(PlannerState)
 builder.add_node("assistant", assistant)
-builder.add_node("tools", ToolNode(tools))
+builder.add_node("tools", ToolNode(tools, handle_tool_errors=True))
+builder.add_node("summarize_conversation", summarize_conversation)
+
 builder.add_edge(START, "assistant")
-builder.add_conditional_edges("assistant", tools_condition)
+builder.add_conditional_edges(
+    "assistant", route_after_assistant, ["tools", "summarize_conversation", END]
+)
 builder.add_edge("tools", "assistant")
+builder.add_edge("summarize_conversation", END)
 
 graph = builder.compile()
