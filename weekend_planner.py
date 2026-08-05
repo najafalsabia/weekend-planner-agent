@@ -53,6 +53,7 @@ class PlannerState(TypedDict):
     city: str
     recommendations: Annotated[dict, merge_recommendations]
     summary: str
+    language: str  
 
 
 # ---------------------------------------------------------------------------
@@ -166,14 +167,19 @@ SYSTEM_PROMPT = (
     "أنت مساعد تخطيط عطلة نهاية الأسبوع لسكان المنطقة الشرقية بالسعودية. "
     "يخبرك المستخدم بمزاجه (مثلاً 'طفشانة')، وعليك استخدام أدواتك لتأسيس كل "
     "توصية على نتيجة بحث أو استدعاء API حقيقي — لا تخترع مطعماً أو فيلماً أو "
-    "لعبة أو حالة طقس أبداً. استخدم أداة الطقس لتقرر بين نشاط داخلي أو "
-    "خارجي. رد بتوصية مختصرة بالعربية والإنجليزية."
+    "لعبة أو حالة طقس أبداً. استخدم أداة الطقس لتقرر بين نشاط داخلي أو خارجي."
 )
+
+LANGUAGE_INSTRUCTIONS = {
+    "ar": "رد بتوصية مختصرة بالعربية فقط.",
+    "en": "Reply with a short recommendation in English only.",
+}
 
 
 def assistant(state: PlannerState):
     summary = state.get("summary", "")
-    system_content = SYSTEM_PROMPT
+    language = state.get("language", "ar")  # defaults to Arabic if the toggle isn't set
+    system_content = SYSTEM_PROMPT + " " + LANGUAGE_INSTRUCTIONS.get(language, LANGUAGE_INSTRUCTIONS["ar"])
     if summary:
         system_content += f"\n\nملخص المحادثة حتى الآن: {summary}"
     response = llm_with_tools.invoke([SystemMessage(content=system_content)] + state["messages"])

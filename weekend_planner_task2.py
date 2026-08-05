@@ -99,6 +99,7 @@ class Task2State(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     mood: str
     city: str
+    language: str
     branch: Optional[str]  # "go_out" | "stay_home" | "unclear"
     recommendations: Annotated[dict, merge_recommendations]
     revision_count: int
@@ -136,10 +137,27 @@ def _is_negated(text, keyword_index):
     window = text[max(0, keyword_index - 15):keyword_index]
     return any(neg in window for neg in NEGATION_WORDS)
 
+CITY_ALIASES = {
+    "Dammam": ["دمام", "الدمام", "dammam"],
+    "Khobar": ["خبر", "الخبر", "khobar"],
+    "Dhahran": ["ظهران", "الظهران", "dhahran"],
+    "Qatif": ["قطيف", "القطيف", "qatif"],
+    "Jubail": ["جبيل", "الجبيل", "jubail"],
+    "Saihat": ["سيهات", "saihat"],
+}
+
+
+def _extract_city(text: str, fallback: str) -> str:
+    text_lower = text.lower()
+    for canonical, aliases in CITY_ALIASES.items():
+        if any(alias in text or alias in text_lower for alias in aliases):
+            return canonical
+    return fallback
 
 def router(state: Task2State):
     last_text = state["messages"][-1].content if state["messages"] else ""
-    weather_result = get_weather.invoke({"city": state.get("city", "Dammam")})
+    city = _extract_city(last_text, state.get("city", "Dammam"))
+    weather_result = get_weather.invoke({"city": city})
 
     out_idx = _first_match_index(last_text, GO_OUT_WORDS)
     home_idx = _first_match_index(last_text, STAY_HOME_WORDS)
@@ -160,6 +178,7 @@ def router(state: Task2State):
 
     return {
         "branch": branch,
+        "city": city,
         "recommendations": weather_result,
         "revision_count": 0,
     }
@@ -299,13 +318,14 @@ def approve_and_remember(state: Task2State, store: BaseStore):
 # ---------------------------------------------------------------------------
 # 6. Final synthesis — LLM, no tools
 # ---------------------------------------------------------------------------
-RESPOND_PROMPT = (
-    "لخّص التوصيات التالية للمستخدم بجملتين إلى ثلاث، بالعربية والإنجليزية: {recommendations}"
-)
+RESPOND_PROMPT_AR = "لخّص التوصيات التالية للمستخدم بجملتين إلى ثلاث، بالعربية فقط: {recommendations}"
+RESPOND_PROMPT_EN = "Summarize the following recommendations for the user in two to three sentences, in English only: {recommendations}"
 
 
 def respond(state: Task2State):
-    prompt = RESPOND_PROMPT.format(recommendations=state.get("recommendations", {}))
+    language = state.get("language", "ar")
+    template = RESPOND_PROMPT_AR if language == "ar" else RESPOND_PROMPT_EN
+    prompt = template.format(recommendations=state.get("recommendations", {}))
     response = llm.invoke([HumanMessage(content=prompt)])
     return {"messages": [response]}
 
