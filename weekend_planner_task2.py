@@ -249,7 +249,10 @@ def book_agent(state: Task2State):
 
 def media_agent(state: Task2State):
     try:
-        result = get_trending_movie_or_game.invoke({"media_type": "movie"})
+        mood = state.get("mood", "")
+        result = get_trending_movie_or_game.invoke(
+            {"media_type": "movie", "preferred_genre": mood}
+        )
         titles = [r.get("title", "") for r in result.get("trending_movie", [])[:1]]
         log = {"suggestion_log": titles} if titles else {}
         result = {**result, **log}
