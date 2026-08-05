@@ -121,6 +121,7 @@ GO_OUT_WORDS = [
 STAY_HOME_WORDS = [
     "بيت", "البيت", "اقعد", "أقعد", "قاعد", "قاعدة", "كتاب", "فيلم", "لعبة",
 ]
+BOTH_WORDS = ["الكل", "كل شي", "الاثنين", "كلهم", "برا وداخل"]
 NEGATION_WORDS = ["لا ", "ما ", "مو ", "مب "]
 
 
@@ -168,10 +169,8 @@ def router(state: Task2State):
     if wants_out and not wants_home:
         branch = "go_out"
     elif wants_home and not wants_out:
-        branch = "stay_home"
+     branch = "stay_home"
     elif wants_out and wants_home:
-        # Both affirmed — trust whichever phrase comes later, since people
-        # often correct themselves mid-sentence ("لا... خلاص أبي كذا").
         branch = "go_out" if out_idx > home_idx else "stay_home"
     else:
         branch = "unclear"
@@ -187,6 +186,8 @@ def router(state: Task2State):
 def route_from_router(state: Task2State):
     if state["branch"] == "unclear":
         return "clarify"
+    if state["branch"] == "both":
+        return "both_dispatch"
     if state["branch"] == "go_out":
         return "go_out_dispatch"
     return "stay_home_dispatch"
@@ -238,6 +239,10 @@ def stay_home_dispatch(state: Task2State):
     # Same idea as go_out_dispatch, for the stay-home branch.
     return {}
 
+def both_dispatch(state: Task2State):
+    # Same idea, but fans out to all three specialists at once.
+    return {}
+
 
 def book_agent(state: Task2State):
     try:
@@ -267,6 +272,7 @@ def media_agent(state: Task2State):
 REQUIRED_KEYS = {
     "go_out": ["spot_suggestion", "trending_movie"],
     "stay_home": ["book_suggestion", "trending_movie"],
+    "both": ["spot_suggestion", "book_suggestion", "trending_movie"],
 }
 
 
@@ -295,6 +301,8 @@ def route_from_critic(state: Task2State):
     if missing and state.get("revision_count", 0) < 2:
         if branch == "go_out":
             return "go_out_dispatch"
+        if branch == "both":
+            return "both_dispatch"
         return "stay_home_dispatch"
     return "approve_and_remember"
 
@@ -342,6 +350,7 @@ builder.add_node("clarify", clarify)
 builder.add_node("place_agent", place_agent)
 builder.add_node("go_out_dispatch", go_out_dispatch)
 builder.add_node("stay_home_dispatch", stay_home_dispatch)
+builder.add_node("both_dispatch", both_dispatch)
 builder.add_node("book_agent", book_agent)
 builder.add_node("media_agent", media_agent)
 builder.add_node("critic", critic)
@@ -352,7 +361,7 @@ builder.add_edge(START, "router")
 builder.add_conditional_edges(
     "router",
     route_from_router,
-    ["clarify", "go_out_dispatch", "stay_home_dispatch"],
+    ["clarify", "go_out_dispatch", "stay_home_dispatch", "both_dispatch"],
 )
 builder.add_edge("clarify", END)  # ends the turn; user's next message re-enters at router
 
@@ -361,16 +370,20 @@ builder.add_edge("go_out_dispatch", "place_agent")
 builder.add_edge("go_out_dispatch", "media_agent")
 builder.add_edge("stay_home_dispatch", "book_agent")
 builder.add_edge("stay_home_dispatch", "media_agent")
+builder.add_edge("both_dispatch", "place_agent")
+builder.add_edge("both_dispatch", "book_agent")
+builder.add_edge("both_dispatch", "media_agent")
 
 # Fan-in: all specialist paths converge on critic.
 builder.add_edge("place_agent", "critic")
 builder.add_edge("book_agent", "critic")
 builder.add_edge("media_agent", "critic")
 
+
 builder.add_conditional_edges(
     "critic",
     route_from_critic,
-    ["go_out_dispatch", "stay_home_dispatch", "approve_and_remember"],
+    ["go_out_dispatch", "stay_home_dispatch", "both_dispatch", "approve_and_remember"],
 )
 builder.add_edge("approve_and_remember", "respond")
 builder.add_edge("respond", END)
