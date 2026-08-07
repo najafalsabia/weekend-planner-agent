@@ -19,22 +19,28 @@ cp .env.example .env   # add GOOGLE_API_KEY, TAVILY_API_KEY, LANGSMITH_API_KEY
 **Files:** `weekend_planner.py` (agent logic) · `task1_weekend_planner.ipynb` (demo/deliverable)
 
 Covers: 4 real tools, custom state + reducer, checkpointer (MemorySaver → SqliteSaver),
-summarization strategy, recursion limit, intentional tool failure recovery.
+a summarization strategy (switched from message-trimming after supervisor feedback),
+recursion limit, intentional tool failure recovery.
 
 Run: `jupyter notebook task1_weekend_planner.ipynb`
 
 ## Task 2 — Multi-agent system
 
-**Nodes:** `router` (weather-grounded routing) → `go_out_dispatch` / `stay_home_dispatch`
-(parallel fan-out) → `place_agent`, `book_agent`, `media_agent` → `critic` (loop-back,
-capped) → `approve_and_remember` (HITL breakpoint + long-term store) → `respond`
+**Nodes:** `router` (weather-grounded routing + Arabic keyword/negation matching) →
+`clarify` (asks the user when the request is ambiguous, ends the turn) |
+`go_out_dispatch` / `stay_home_dispatch` / `both_dispatch` (parallel fan-out) →
+`place_agent`, `book_agent`, `media_agent` → `critic` (validates output, loop-back
+to the relevant dispatch node, capped at 2 revisions) → `approve_and_remember`
+(HITL breakpoint + long-term store) → `respond`
 
 **Files:** `weekend_planner_task2.py` (agent logic, imports Task 1's tools) ·
 `task2_weekend_planner.ipynb` (demo/deliverable)
 
-Covers: conditional routing (both branches demoed), parallel step, critic with
-hard-capped loop-back, HITL breakpoint, long-term memory across sessions, time-travel
-debugging of a real failure.
+Covers: conditional routing (go_out / stay_home / both / unclear branches, both
+demoed), a genuine parallel fan-out step, critic with hard-capped loop-back, HITL
+breakpoint before writing to memory, long-term memory across sessions (not just
+threads), and time-travel debugging of a real critic-rejection/retry case via
+`get_state_history` + replay from an earlier checkpoint.
 
 Run: `jupyter notebook task2_weekend_planner.ipynb`
 
